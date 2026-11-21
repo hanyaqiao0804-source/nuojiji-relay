@@ -60,6 +60,74 @@ export function createApp() {
         return c.json({ ok: true, store: outbox.kind || 'unknown', version: VERSION });
     });
 
+    // 🔍 诊断接口（需鉴权）：一眼看到 cron tick 状态、注册的 pair 数量、最近错误。
+    //   用法：浏览器访问 https://你的中继地址/debug?secret=你的RELAY_SECRET
+    //   或带 header：Authorization: Bearer 你的RELAY_SECRET 访问 /debug
+    app.use('/debug', async (c, next) => {
+        const secret = c.env?.RELAY_SECRET || (typeof process !== 'undefined' ? process.env?.RELAY_SECRET : '');
+        if (!secret) return c.json({ error: 'RELAY_SECRET not configured' }, 500);
+        // 优先看 header，其次支持 ?secret= 方便浏览器直接访问
+        const auth = c.req.header('Authorization') || '';
+        const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+        const querySecret = c.req.query('secret') || '';
+        const provided = token || querySecret;
+        if (!provided || provided !== secret) return c.json({ error: 'unauthorized' }, 401);
+        await next();
+    });
+    app.get('/debug', async (c) => {
+        const { proactive, kv } = await getStores(c.env);
+        const allPairs = await proactive.listEnabled().catch(() => []);
+        const tickMinutes = await readTickMinutes(c.env, kv).catch(() => 'unknown');
+        const now = Date.now();
+
+        // 读 KV 里存的最近错误日志（tick.js 写入）
+        let lastErrors = [];
+        try {
+            const raw = await kv.get('debug:errors');
+            if (raw) lastErrors = JSON.parse(raw);
+        } catch { /* ignore */ }
+
+        // 读 tick 游标和锁状态
+        let tickCursor = null, tickLockUntil = null;
+        try { tickCursor = await proactive.getTickCursor?.(); } catch { /* ignore */ }
+        try {
+            const lockRaw = await kv.get('tick:lock');
+            if (lockRaw) tickLockUntil = Number(lockRaw) > now ? 'locked' : 'expired';
+        } catch { /* ignore */ }
+
+        return c.json({
+            ok: true,
+            version: VERSION,
+            time: new Date(now).toISOString(),
+            tickMinutes,
+            envTickLocked: hasEnvTickMinutes(c.env),
+            cronSchedule: '*/5 * * * * (every 5 minutes)',
+            registeredPairs: allPairs.length,
+            pairs: allPairs.map(r => ({
+                userId: r.userId,
+                charId: r.charId,
+                charName: r.timeSpec?.charName || '(unknown)',
+                enabled: r.enabled,
+                mode: r.mode || 'impulse',
+                lastFiredAt: r.lastFiredAt ? new Date(r.lastFiredAt).toISOString() : null,
+                lastInteractionAt: r.lastInteractionAt ? new Date(r.lastInteractionAt).toISOString() : null,
+                updatedAt: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
+                stale: r.updatedAt ? (now - r.updatedAt > 7 * 24 * 60 * 60 * 1000) : true,
+                aiSettingsConfigured: !!(r.aiSettings?.mainApiUrl && r.aiSettings?.mainApiKey),
+                aiModel: r.aiSettings?.mainApiModel || '(not set)',
+                windowSize: (r.recentMessages || []).length,
+            })),
+            tickCursor,
+            tickLock: tickLockUntil,
+            lastErrors,
+            hint: lastErrors.length
+                ? '⚠️ 有 AI 生成失败记录！看 lastErrors 里的 error 字段。这就是没收到消息的原因。'
+                : (allPairs.length === 0
+                    ? '⚠️ 没有注册任何主动消息 pair！请在 App 里开启角色的主动消息功能。'
+                    : '✅ 暂无错误记录。如果没收到消息，检查：1) pair 是否 stale; 2) AI key 是否有效; 3) 推送是否配置。'),
+        });
+    });
+
     // 🖼️ 角色头像公开读取（无鉴权）——iOS 通知扩展(独立进程,App 没运行)要能直接 GET 下载，
     //    附到 Communication Notification 显示在通知左侧。头像只是公开可见的角色头像，无敏感信息。
     //    存在 KV（OUTBOX namespace 的 av: 前缀），由 POST /avatar 写入。

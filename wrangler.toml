@@ -15,7 +15,9 @@ binding = "OUTBOX"
 #   VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT（可选，开 Web Push）
 
 # Phase 2：定时主动生成（角色 App 关闭也能主动找你）。
-# 每分钟 tick：遍历已注册的 pair 重算 impulse，命中就实时调 AI 生成 → outbox + 推送。
+# 每 5 分钟 tick：遍历已注册的 pair 重算 impulse，命中就实时调 AI 生成 → outbox + 推送。
 # 不需要主动消息可注释掉这两行。
+# ⚠️ 改为 */5 而非每分钟：App 设置的检测间隔只是逻辑跳过，cron 每分钟仍会唤醒 Worker
+#    产生一次请求 + KV 读，改成每 5 分钟直接从源头减少 80% 的 cron 调用和 KV 读写。
 [triggers]
 crons = ["*/5 * * * *"]

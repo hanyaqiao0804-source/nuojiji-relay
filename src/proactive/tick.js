@@ -282,6 +282,24 @@ export async function runProactiveTick(env) {
                 //   ⚠️ 传 1 而非 0：各 store 的 claimFire 对 0 走 `now || Date.now()` 会反而写成现在。
                 try { await proactive.claimFire(rec.inboxId, INBOX_SLOT_USER, INBOX_SLOT_CHAR, prevInboxFire || 1); } catch { /* ignore */ }
                 console.warn('[proactive] generation failed, short cooldown 5min:', error);
+
+                // 🔍 把错误写进 KV debug:errors，让 /debug 接口能读到（最多保留最近 10 条）
+                try {
+                    const kv = await createKvStore(env);
+                    let existing = [];
+                    try { const raw = await kv.get('debug:errors'); if (raw) existing = JSON.parse(raw); } catch { /* ignore */ }
+                    existing.unshift({
+                        time: new Date(now).toISOString(),
+                        charName: rec.timeSpec?.charName || '(unknown)',
+                        charId: rec.charId,
+                        userId: rec.userId,
+                        error: String(error).slice(0, 500),
+                        aiModel: rec.aiSettings?.mainApiModel || '(not set)',
+                        aiUrl: rec.aiSettings?.mainApiUrl ? '(configured)' : '(missing)',
+                    });
+                    await kv.put('debug:errors', JSON.stringify(existing.slice(0, 10)));
+                } catch { /* KV 写入失败也不挡主流程 */ }
+
                 continue;
             }
 
